@@ -186,7 +186,13 @@ router.patch("/beds/:id/status", asyncH(async (req, res) => {
     consultant_group_id: z.number().int().positive().nullable().optional(),
   }).parse(req.body);
 
-  const bed = await db.prepare("SELECT ward_id FROM bed_details WHERE id=?").get<{ ward_id: number }>(bedId);
+  // station_id comes along for the emit below: nurses only ever join
+  // station:<id> rooms (never "overview"/ward:), so it's the only way a bed
+  // change made here reaches the nurses staffing that ward. Joined onto the
+  // lookup this route already does rather than fetched separately.
+  const bed = await db.prepare(
+    "SELECT bd.ward_id, w.station_id FROM bed_details bd JOIN wards w ON w.id = bd.ward_id WHERE bd.id=?"
+  ).get<{ ward_id: number; station_id: number | null }>(bedId);
   if (!bed) throw new HttpError(404, "Bed not found");
   await assertWardOperational(bed.ward_id);
 
@@ -206,7 +212,7 @@ router.patch("/beds/:id/status", asyncH(async (req, res) => {
     physicalStatus: physical_status, reservationStatus: reservation_status,
     payerType: result.payer_type, destination: result.destination, reservationNote: result.reservation_note,
     bed: bedDetail,
-  }, { wardId: result.ward_id });
+  }, { wardId: result.ward_id, stationId: bed.station_id ?? undefined });
   res.json(result);
 }));
 
@@ -224,7 +230,10 @@ router.patch("/beds/:id/admission", asyncH(async (req, res) => {
     payer_type:      z.string().max(100).nullable().optional(),
   }).parse(req.body);
 
-  const bed = await db.prepare("SELECT ward_id, physical_status FROM bed_details WHERE id=?").get<{ ward_id: number; physical_status: string }>(bedId);
+  // station_id joined on for the emit below — see the note on the status route.
+  const bed = await db.prepare(
+    "SELECT bd.ward_id, bd.physical_status, w.station_id FROM bed_details bd JOIN wards w ON w.id = bd.ward_id WHERE bd.id=?"
+  ).get<{ ward_id: number; physical_status: string; station_id: number | null }>(bedId);
   if (!bed) throw new HttpError(404, "Bed not found");
   await assertWardOperational(bed.ward_id);
   if (bed.physical_status !== "OCCUPIED") throw new HttpError(409, "Bed is not currently occupied.");
@@ -237,7 +246,7 @@ router.patch("/beds/:id/admission", asyncH(async (req, res) => {
     payerType: payer_type,
   });
 
-  emitUpdate("bed:update", { bedId, wardId: bed.ward_id }, { wardId: bed.ward_id });
+  emitUpdate("bed:update", { bedId, wardId: bed.ward_id }, { wardId: bed.ward_id, stationId: bed.station_id ?? undefined });
   res.json({ ok: true });
 }));
 

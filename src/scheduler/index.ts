@@ -9,6 +9,27 @@ const lastPush = new Map<string, number>();
 const REPUSH_MS = 5 * 60 * 1000;
 let lastCaptureDate   = "";
 let lastSnapshotHour  = -1;
+/** The round key each PRE block was last announced as OVERDUE for — same
+ *  "don't re-emit unchanged state" pattern as notifiedDelays below.
+ *
+ *  alarm:active used to fire on every 30s tick for as long as a round stayed
+ *  unsubmitted. Because emitUpdate() always also broadcasts to "overview"
+ *  (io.ts), every connected COO/FC/PRE/PHARMACY/CONSULTANT client then refetched
+ *  its whole /me aggregate — roughly 120 requests an hour each, all re-announcing
+ *  a fact that had not changed.
+ *
+ *  The repeat was covering clients that arrive AFTER the alarm starts, but they
+ *  never needed it: /pre/me already returns alarmState (pre.ts), so a late login
+ *  learns the alarm from its own first load, and a client that was offline gets
+ *  a catch-up refetch from onReconnect(). Announcing each transition once is
+ *  therefore sufficient.
+ *
+ *  Keyed by block, not by user, so a block with several PRE users announces once
+ *  rather than once per user. Push notifications below are deliberately NOT
+ *  gated by this — they are the escalation for someone who is not looking at a
+ *  screen, and keep their own REPUSH_MS cadence. */
+const lastAlarmRound = new Map<number, string>();
+
 /** Admissions whose delay has already been broadcast — prevents a 30s re-emit loop. */
 const notifiedDelays = new Set<number>();
 const notifiedOverstays = new Set<number>();
@@ -48,10 +69,22 @@ async function tick() {
     const submittedKeys = new Set(submittedRows.map(r => r.round_key));
 
     for (const { u, key } of keyMeta) {
-      if (submittedKeys.has(key)) continue;
+      if (submittedKeys.has(key)) {
+        // Submitted: drop the marker so the NEXT round re-announces cleanly.
+        // The alarm clearing on screen is driven by the round:submit event the
+        // submit route emits (pre.ts), not by anything here.
+        lastAlarmRound.delete(u.pre_block_id);
+        continue;
+      }
 
       const label = u.block_name ?? `PRE Block ${u.pre_block_id}`;
-      emitUpdate("alarm:active", { floor: label }, { pre: String(u.pre_block_id) });
+      // Announce only the transition into "overdue". Still-overdue ticks say
+      // nothing. The key carries the round + date, so a new round rolling over
+      // (or a new day) no longer matches and correctly announces once more.
+      if (lastAlarmRound.get(u.pre_block_id) !== key) {
+        lastAlarmRound.set(u.pre_block_id, key);
+        emitUpdate("alarm:active", { floor: label }, { pre: String(u.pre_block_id) });
+      }
 
       const pushKey = "pre:" + u.id;
       if (now - (lastPush.get(pushKey) || 0) >= REPUSH_MS) {

@@ -605,7 +605,11 @@ export async function allBedDetailsLive(restrictWardIds?: number[] | null) {
             bd.bed_name, bd.physical_status, bd.reservation_status, bd.payer_type,
             bd.destination, bd.reservation_note, bd.operational_status,
             bd.updated_at, u.name AS updated_by_name, row_to_json(dt.*) AS discharge_tracking,
-            pa.admission_type, pa.ip_last6,
+            -- patient_name/admission_date ride along on the same active-admission
+            -- join the IP already uses, so every role reading this feed (PRE, FC,
+            -- Nurse, Doctor, COO, Pharmacy, Consultant) gets them at no extra cost.
+            -- patient_name is what makes Entry search by patient name possible.
+            pa.admission_type, pa.ip_last6, pa.patient_name, pa.admission_date,
             w_from.id AS origin_ward_id, w_from.name AS origin_ward_name, bd_from.bed_name AS origin_bed_name
      FROM bed_details bd
      JOIN wards w ON w.id = bd.ward_id

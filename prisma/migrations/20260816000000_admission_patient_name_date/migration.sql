@@ -1,0 +1,23 @@
+-- Patient name + the user-entered date of admission, captured on bed entry.
+--
+-- Both are deliberately nullable. Every bed occupied before this feature existed
+-- has neither value, and those rows stay blank until staff fill them in during a
+-- later edit — a NOT NULL here would either break the deploy or force a fabricated
+-- backfill. "Required" is enforced in the API and the UI for NEW admissions
+-- instead; see validatePatientName / validateAdmissionDate in
+-- patientAdmissionService.ts for the exact rule (required on create; on edit,
+-- required only once the field is actually touched).
+--
+-- admission_date is the date the patient was admitted to the hospital, typed by
+-- the user. It is NOT the moment this bed became Occupied — that is admitted_at,
+-- which the server sets automatically and which stays untouched by this change.
+-- The two genuinely differ: a transfer or a late entry is admitted days before
+-- the bed it currently occupies was assigned.
+--
+-- Stored as a YYYY-MM-DD string rather than a BIGINT epoch because it is a
+-- calendar date with no time and no timezone. Forcing it into an epoch would mean
+-- picking an arbitrary midnight-in-some-zone and reintroduces off-by-one-day bugs
+-- on a server that runs UTC for a hospital in IST. discharge_tracking.planned_date
+-- already uses exactly this representation.
+ALTER TABLE patient_admissions ADD COLUMN IF NOT EXISTS patient_name   VARCHAR(120);
+ALTER TABLE patient_admissions ADD COLUMN IF NOT EXISTS admission_date VARCHAR(10);

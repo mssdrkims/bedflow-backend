@@ -240,13 +240,17 @@ router.get("/destinations", asyncH(async (_req, res) => {
 router.patch("/beds/:id/status", asyncH(async (req, res) => {
   const doctorId = req.user!.id;
   const bedId = Number(req.params.id);
-  const { physical_status, reservation_status, payer_type, destination, reservation_note, ip_last6, admission_type, department_name, doctor_id, department_id, consultant_group_id } = z.object({
+  const { physical_status, reservation_status, payer_type, destination, reservation_note, ip_last6, patient_name, admission_date, admission_type, department_name, doctor_id, department_id, consultant_group_id } = z.object({
     physical_status:    z.enum(["VACANT", "OCCUPIED"]),
     reservation_status: z.enum(["NONE", "RESERVED"]),
     payer_type:         z.string().max(100).nullable().optional(),
     destination:        z.string().max(100).nullable().optional(),
     reservation_note:   z.string().max(255).nullable().optional(),
     ip_last6:           z.string().max(6).optional(),
+    // Not .nullable(): omitting these means "untouched", but an explicit null
+    // would mean "blank them", which is never allowed once a value exists.
+    patient_name:       z.string().max(120).optional(),
+    admission_date:     z.string().max(10).optional(),
     admission_type:     z.enum(["IP", "DAYCARE", "OPD"]).optional(),
     department_name:    z.string().max(120).nullable().optional(),
     doctor_id:          z.number().int().positive().nullable().optional(),
@@ -269,6 +273,7 @@ router.patch("/beds/:id/status", asyncH(async (req, res) => {
     bedId, physicalStatus: physical_status, reservationStatus: reservation_status,
     payerType: payer_type, destination, reservationNote: reservation_note, userId: doctorId,
     ipLast6: ip_last6, admissionType: admission_type, departmentName: department_name,
+    patientName: patient_name, admissionDate: admission_date,
     doctorId: doctor_id, departmentId: department_id, consultantGroupId: consultant_group_id,
   });
 

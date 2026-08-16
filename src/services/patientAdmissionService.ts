@@ -1,5 +1,6 @@
 import { db } from "../db/index.js";
 import { HttpError } from "../middleware/error.js";
+import { ALLOW_FUTURE_ADMISSION_DATE, isValidIsoDate, todayStr } from "../config/domain.js";
 import { audit } from "./auditService.js";
 import { consultantRoomsFor } from "./consultantGroupService.js";
 import { emitConsultantPatientUpdate } from "../websocket/io.js";
@@ -11,6 +12,15 @@ export interface PatientAdmission {
   /** Null only for admissions backfilled for beds that were already Occupied
    *  before the discharge module existed — every new admission has one. */
   ip_last6: string | null;
+  /** Required on every new admission, but null on any admission created before
+   *  this field existed — those stay blank until staff edit them in. Anything
+   *  rendering it must handle null rather than assume a name is present. */
+  patient_name: string | null;
+  /** The date the patient was admitted to the hospital, as typed by the user —
+   *  "YYYY-MM-DD", no time, no timezone. Distinct from admitted_at, which is the
+   *  server clock at the moment this bed flipped to Occupied. Null on admissions
+   *  predating this field, same as patient_name. */
+  admission_date: string | null;
   /** Manual free-text entry captured at admission — same "V1 manual, HIS later" pattern as ip_last6. */
   consultant_name: string | null;
   department_name: string | null;
@@ -48,6 +58,36 @@ export function validateAdmissionType(admissionType: string | undefined | null):
   const value = (admissionType ?? "").toString().trim().toUpperCase();
   if (!ADMISSION_TYPES.includes(value)) throw new HttpError(400, "Admission type must be IP, Daycare, or OPD.");
   return value;
+}
+
+const PATIENT_NAME_MAX = 120;
+
+/** Patient name as typed by the user. Runs of whitespace are collapsed so
+ *  "John   Smith" and "John Smith" don't become two different-looking patients.
+ *  Rejects blank — the column is nullable only so that pre-existing rows can stay
+ *  blank, never so that a new value may be saved empty. */
+export function validatePatientName(patientName: string | undefined | null): string {
+  const trimmed = (patientName ?? "").toString().trim().replace(/\s+/g, " ");
+  if (!trimmed) throw new HttpError(400, "Patient name is required.");
+  if (trimmed.length > PATIENT_NAME_MAX)
+    throw new HttpError(400, `Patient name must be ${PATIENT_NAME_MAX} characters or fewer.`);
+  return trimmed;
+}
+
+/** User-entered date of admission, "YYYY-MM-DD". */
+export function validateAdmissionDate(admissionDate: string | undefined | null): string {
+  const trimmed = (admissionDate ?? "").toString().trim();
+  if (!trimmed) throw new HttpError(400, "Date of admission is required.");
+  if (!isValidIsoDate(trimmed))
+    throw new HttpError(400, "Date of admission must be a valid date in YYYY-MM-DD format.");
+  // Compared as strings on purpose: zero-padded ISO dates sort chronologically,
+  // so this is an exact calendar comparison with no Date arithmetic and no
+  // timezone to get wrong. todayStr() is IST — using the server's own clock here
+  // would reject a legitimately-today date for the 5.5 hours each night that
+  // UTC is still on the previous day.
+  if (!ALLOW_FUTURE_ADMISSION_DATE && trimmed > todayStr())
+    throw new HttpError(400, "Date of admission cannot be in the future.");
+  return trimmed;
 }
 
 /** Exactly one of doctorId/consultantGroupId must be set — never both, never
@@ -97,7 +137,7 @@ export async function getMyPatientsRow(admissionId: number): Promise<Record<stri
        bd.operational_status, bd.updated_at, bd.payer_type,
        pa.id AS admission_id, pa.consultant_name, pa.department_name,
        pa.owner_type, pa.doctor_id, pa.consultant_group_id,
-       pa.ip_last6, pa.admission_type, pa.admitted_at,
+       pa.ip_last6, pa.patient_name, pa.admission_date, pa.admission_type, pa.admitted_at,
        row_to_json(dt.*) AS discharge_tracking
      FROM patient_admissions pa
      JOIN bed_details bd ON bd.id = pa.bed_id
@@ -115,12 +155,17 @@ export async function getAdmissionById(admissionId: number): Promise<PatientAdmi
  *  bedDetailService post-commit hook — never call this directly from a route. */
 export async function createAdmission(opts: {
   bedId: number; wardId: number; ipLast6: string; admissionType: string; userId: number;
+  patientName: string; admissionDate: string;
   departmentName?: string | null;
   doctorId?: number | null; departmentId?: number | null;
   consultantGroupId?: number | null;
 }): Promise<PatientAdmission> {
   const ipLast6 = validateIpLast6(opts.ipLast6);
   const admissionType = validateAdmissionType(opts.admissionType);
+  // Required on every new admission — unlike the edit path, there is no
+  // "pre-existing blank" case to accommodate here.
+  const patientName = validatePatientName(opts.patientName);
+  const admissionDate = validateAdmissionDate(opts.admissionDate);
   const departmentName = opts.departmentName?.toString().trim() || null;
   const departmentId = opts.departmentId ?? null;
   if (!departmentId) throw new HttpError(400, "Department is required.");
@@ -143,16 +188,16 @@ export async function createAdmission(opts: {
 
   const now = Date.now();
   const row = await db.prepare(
-    `INSERT INTO patient_admissions (bed_id, ward_id, ip_last6, admission_type, consultant_name, department_name, doctor_id, department_id, owner_type, consultant_group_id, status, admitted_at, created_by, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?,?) RETURNING id`
+    `INSERT INTO patient_admissions (bed_id, ward_id, ip_last6, patient_name, admission_date, admission_type, consultant_name, department_name, doctor_id, department_id, owner_type, consultant_group_id, status, admitted_at, created_by, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?,?) RETURNING id`
   ).run(
-    opts.bedId, opts.wardId, ipLast6, admissionType, consultantName, departmentName,
+    opts.bedId, opts.wardId, ipLast6, patientName, admissionDate, admissionType, consultantName, departmentName,
     ownerType === "DOCTOR" ? doctorId : null, departmentId, ownerType, ownerType === "GROUP" ? consultantGroupId : null,
     now, opts.userId, now,
   );
   const admission = await getAdmissionById(Number(row.lastInsertRowid));
 
-  await audit(opts.userId, "admission_create", String(opts.bedId), { ipLast6, admissionType, wardId: opts.wardId, consultantName, departmentName, ownerType, doctorId, consultantGroupId, departmentId });
+  await audit(opts.userId, "admission_create", String(opts.bedId), { ipLast6, patientName, admissionDate, admissionType, wardId: opts.wardId, consultantName, departmentName, ownerType, doctorId, consultantGroupId, departmentId });
 
   const rooms = consultantRoomsFor({ owner_type: ownerType, doctor_id: doctorId, consultant_group_id: consultantGroupId });
   if (rooms.length) {
@@ -171,6 +216,7 @@ export async function createAdmission(opts: {
 export async function updateActiveAdmission(opts: {
   bedId: number; userId: number;
   ipLast6?: string; admissionType?: string;
+  patientName?: string; admissionDate?: string;
   departmentName?: string | null;
   doctorId?: number | null; departmentId?: number | null;
   consultantGroupId?: number | null;
@@ -197,6 +243,20 @@ export async function updateActiveAdmission(opts: {
   }
 
   const admissionType = opts.admissionType !== undefined ? validateAdmissionType(opts.admissionType) : admission.admission_type;
+
+  // Patient name / date of admission are required on create but only conditionally
+  // here, and the condition is "was this field sent at all". The client diffs the
+  // edit form against a snapshot and sends only what the user actually touched, so
+  // `undefined` means untouched — the stored value is kept verbatim, including the
+  // null carried by every admission that predates these two columns. That is what
+  // lets FC fix a payer type on an old bed without being forced to invent a name
+  // and an admission date for a patient admitted weeks ago. The moment either
+  // field IS sent it goes through the same validator create uses, so a touched
+  // field can never be saved blank or malformed — staff fill these in over time,
+  // and each one that gets filled in is fully validated.
+  const patientName = opts.patientName !== undefined ? validatePatientName(opts.patientName) : admission.patient_name;
+  const admissionDate = opts.admissionDate !== undefined ? validateAdmissionDate(opts.admissionDate) : admission.admission_date;
+
   const departmentId = opts.departmentId !== undefined ? opts.departmentId : admission.department_id;
   const departmentName = opts.departmentName !== undefined ? (opts.departmentName?.toString().trim() || null) : admission.department_name;
   if (!departmentId) throw new HttpError(400, "Department is required.");
@@ -222,9 +282,9 @@ export async function updateActiveAdmission(opts: {
   await db.transaction(async () => {
     const r = await db.prepare(
       `UPDATE patient_admissions
-       SET ip_last6=?, admission_type=?, consultant_name=?, department_name=?, doctor_id=?, department_id=?, owner_type=?, consultant_group_id=?, updated_at=?
+       SET ip_last6=?, patient_name=?, admission_date=?, admission_type=?, consultant_name=?, department_name=?, doctor_id=?, department_id=?, owner_type=?, consultant_group_id=?, updated_at=?
        WHERE id=? AND status='ACTIVE' AND updated_at=?`
-    ).run(ipLast6, admissionType, consultantName, departmentName, doctorId, departmentId, ownerType, consultantGroupId, now, admission.id, admission.updated_at);
+    ).run(ipLast6, patientName, admissionDate, admissionType, consultantName, departmentName, doctorId, departmentId, ownerType, consultantGroupId, now, admission.id, admission.updated_at);
     if (r.changes === 0) throw new HttpError(409, "Patient info was just updated by someone else. Please refresh and try again.");
 
     if (opts.payerType !== undefined) {
@@ -236,12 +296,13 @@ export async function updateActiveAdmission(opts: {
     await audit(opts.userId, "admission_update", String(opts.bedId), {
       old: {
         ipLast6: admission.ip_last6, admissionType: admission.admission_type,
+        patientName: admission.patient_name, admissionDate: admission.admission_date,
         consultantName: admission.consultant_name, departmentName: admission.department_name,
         ownerType: admission.owner_type, doctorId: admission.doctor_id, consultantGroupId: admission.consultant_group_id,
         departmentId: admission.department_id,
         payerType: opts.payerType !== undefined ? undefined : "(unchanged)",
       },
-      new: { ipLast6, admissionType, consultantName, departmentName, ownerType, doctorId, consultantGroupId, departmentId,
+      new: { ipLast6, patientName, admissionDate, admissionType, consultantName, departmentName, ownerType, doctorId, consultantGroupId, departmentId,
              ...(opts.payerType !== undefined ? { payerType: opts.payerType } : {}) },
     });
   });

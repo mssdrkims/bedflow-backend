@@ -124,7 +124,7 @@ router.get("/beds/:wardId", asyncH(async (req, res) => {
        bd.id, bd.ward_id, bd.bed_name, bd.physical_status, bd.reservation_status,
        bd.bed_type, bd.operational_status, bd.payer_type, bd.destination, bd.reservation_note,
        bd.updated_at, row_to_json(dt.*) AS discharge_tracking,
-       pa.ip_last6, pa.admission_type, pa.consultant_name, pa.department_name,
+       pa.ip_last6, pa.patient_name, pa.admission_date, pa.admission_type, pa.consultant_name, pa.department_name,
        pa.doctor_id, pa.department_id, pa.owner_type, pa.consultant_group_id
      FROM bed_details bd
      JOIN patient_admissions pa ON pa.bed_id = bd.id AND pa.status = 'ACTIVE'
@@ -166,6 +166,8 @@ router.get("/my-patients", asyncH(async (req, res) => {
        pa.owner_type,
        pa.consultant_group_id,
        pa.ip_last6,
+       pa.patient_name,
+       pa.admission_date,
        pa.admission_type,
        bd.payer_type,
        pa.admitted_at,
@@ -205,6 +207,8 @@ router.get("/my-discharges", asyncH(async (req, res) => {
        pa.consultant_name,
        pa.department_name,
        pa.ip_last6,
+       pa.patient_name,
+       pa.admission_date,
        pa.admission_type,
        bd.payer_type,
        pa.admitted_at,

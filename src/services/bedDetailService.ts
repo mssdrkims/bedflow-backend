@@ -1,7 +1,7 @@
 import { db } from "../db/index.js";
 import { HttpError } from "../middleware/error.js";
 import { audit } from "./auditService.js";
-import { validateIpLast6, validateAdmissionType, createAdmission } from "./patientAdmissionService.js";
+import { validateIpLast6, validateAdmissionType, validatePatientName, validateAdmissionDate, createAdmission } from "./patientAdmissionService.js";
 
 const BED_NAME_RE = /^[A-Za-z0-9 \-]+$/;
 
@@ -145,6 +145,11 @@ export interface BedDetail {
    *  regardless of whether a discharge has started. */
   admission_id: number | null;
   ip_last6: string | null;
+  /** Null for any admission created before these two fields existed — the UI
+   *  shows "Not recorded" rather than an empty cell so staff can tell a
+   *  pre-existing gap apart from a rendering fault. */
+  patient_name: string | null;
+  admission_date: string | null;
   admission_type: string | null;
   consultant_name: string | null;
   department_name: string | null;
@@ -182,7 +187,7 @@ export async function listBeds(
   let sql = `SELECT bd.id, bd.ward_id, bd.bed_name, bd.physical_status, bd.reservation_status,
                     bd.bed_type, bd.operational_status, bd.ac_status, bd.payer_type, bd.destination, bd.reservation_note,
                     bd.updated_at, bd.updated_by, row_to_json(dt.*) AS discharge_tracking,
-                    pa.id AS admission_id, pa.ip_last6, pa.admission_type, pa.consultant_name, pa.department_name,
+                    pa.id AS admission_id, pa.ip_last6, pa.patient_name, pa.admission_date, pa.admission_type, pa.consultant_name, pa.department_name,
                     pa.doctor_id, pa.department_id, pa.owner_type, pa.consultant_group_id,
                     w_from.name AS origin_ward_name, bd_from.bed_name AS origin_bed_name, lt.reason AS origin_note
              FROM bed_details bd
@@ -233,7 +238,7 @@ export async function getBedDetail(bedId: number): Promise<BedDetail | undefined
     `SELECT bd.id, bd.ward_id, bd.bed_name, bd.physical_status, bd.reservation_status,
             bd.bed_type, bd.operational_status, bd.ac_status, bd.payer_type, bd.destination, bd.reservation_note,
             bd.updated_at, bd.updated_by, row_to_json(dt.*) AS discharge_tracking,
-            pa.id AS admission_id, pa.ip_last6, pa.admission_type, pa.consultant_name, pa.department_name,
+            pa.id AS admission_id, pa.ip_last6, pa.patient_name, pa.admission_date, pa.admission_type, pa.consultant_name, pa.department_name,
             pa.doctor_id, pa.department_id, pa.owner_type, pa.consultant_group_id,
             w_from.name AS origin_ward_name, bd_from.bed_name AS origin_bed_name, lt.reason AS origin_note
      FROM bed_details bd
@@ -435,6 +440,11 @@ export async function updateBedStatus(opts: {
   ipLast6?: string;
   /** "IP" | "DAYCARE" — required alongside ipLast6 on a fresh admission. */
   admissionType?: string;
+  /** Patient name and the user-entered date of admission ("YYYY-MM-DD") — both
+   *  required alongside ipLast6 on a fresh admission. The date is what the user
+   *  types; it is not derived from the clock (see admitted_at for that). */
+  patientName?: string;
+  admissionDate?: string;
   /** Optional free-text captured alongside ipLast6 on a fresh admission — same
    *  "V1 manual entry, HIS integration later" pattern. */
   departmentName?: string | null;
@@ -484,14 +494,18 @@ export async function updateBedStatus(opts: {
   if (!["NONE", "RESERVED"].includes(opts.reservationStatus))
     throw new HttpError(400, "Invalid reservation_status");
 
-  // A fresh Vacant→Occupied admission requires the patient's IP number up front —
-  // validated here, before the transaction commits, so a bad/missing ip_last6 never
-  // leaves the bed marked Occupied with no admission record behind it.
+  // A fresh Vacant→Occupied admission requires the patient's IP number, name and
+  // date of admission up front — validated here, before the transaction commits,
+  // so a bad/missing value never leaves the bed marked Occupied with no admission
+  // record behind it. createAdmission re-validates the same fields; this earlier
+  // pass exists purely so the failure happens before anything is written.
   const changeReason = opts.changeReason ?? "MANUAL";
   const isFreshAdmission = changeReason === "MANUAL" && bed.physical_status === "VACANT" && opts.physicalStatus === "OCCUPIED";
   if (isFreshAdmission) {
     validateIpLast6(opts.ipLast6);
     validateAdmissionType(opts.admissionType);
+    validatePatientName(opts.patientName);
+    validateAdmissionDate(opts.admissionDate);
   }
 
   // Once a discharge has been planned or started for the bed's active admission,
@@ -614,6 +628,7 @@ export async function updateBedStatus(opts: {
       bedId: opts.bedId, wardId: bed.ward_id,
       oldPhysical: bed.physical_status, newPhysical: opts.physicalStatus,
       ipLast6: opts.ipLast6, admissionType: opts.admissionType,
+      patientName: opts.patientName, admissionDate: opts.admissionDate,
       departmentName: opts.departmentName,
       doctorId: opts.doctorId, departmentId: opts.departmentId, consultantGroupId: opts.consultantGroupId,
       changeReason, userId: opts.userId,
@@ -637,6 +652,7 @@ export async function updateBedStatus(opts: {
 async function handleDischargeSideEffects(opts: {
   bedId: number; wardId: number; oldPhysical: string; newPhysical: string;
   ipLast6?: string; admissionType?: string; departmentName?: string | null;
+  patientName?: string; admissionDate?: string;
   doctorId?: number | null; departmentId?: number | null; consultantGroupId?: number | null;
   changeReason: "MANUAL" | "TRANSFER" | "DISCHARGE_CHECKOUT"; userId: number;
 }) {
@@ -647,9 +663,11 @@ async function handleDischargeSideEffects(opts: {
   if (!freshlyOccupied && !vacated) return;
 
   if (freshlyOccupied) {
-    // ip_last6 / admission_type were already validated above, before the transaction committed.
+    // ip_last6 / admission_type / patient_name / admission_date were already
+    // validated above, before the transaction committed.
     await createAdmission({
       bedId: opts.bedId, wardId: opts.wardId, ipLast6: opts.ipLast6!.trim(), admissionType: opts.admissionType!, userId: opts.userId,
+      patientName: opts.patientName!, admissionDate: opts.admissionDate!,
       departmentName: opts.departmentName,
       doctorId: opts.doctorId, departmentId: opts.departmentId, consultantGroupId: opts.consultantGroupId,
     });

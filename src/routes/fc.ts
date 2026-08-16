@@ -172,13 +172,17 @@ router.get("/wards/:id/beds", asyncH(async (req, res) => {
 
 router.patch("/beds/:id/status", asyncH(async (req, res) => {
   const bedId = Number(req.params.id);
-  const { physical_status, reservation_status, payer_type, destination, reservation_note, ip_last6, admission_type, department_name, doctor_id, department_id, consultant_group_id } = z.object({
+  const { physical_status, reservation_status, payer_type, destination, reservation_note, ip_last6, patient_name, admission_date, admission_type, department_name, doctor_id, department_id, consultant_group_id } = z.object({
     physical_status:    z.enum(["VACANT", "OCCUPIED"]),
     reservation_status: z.enum(["NONE", "RESERVED"]),
     payer_type:         z.string().max(100).nullable().optional(),
     destination:        z.string().max(100).nullable().optional(),
     reservation_note:   z.string().max(255).nullable().optional(),
     ip_last6:           z.string().max(6).optional(),
+    // Not .nullable(): omitting these means "untouched", but an explicit null
+    // would mean "blank them", which is never allowed once a value exists.
+    patient_name:       z.string().max(120).optional(),
+    admission_date:     z.string().max(10).optional(),
     admission_type:     z.enum(["IP", "DAYCARE", "OPD"]).optional(),
     department_name:    z.string().max(120).nullable().optional(),
     doctor_id:          z.number().int().positive().nullable().optional(),
@@ -200,6 +204,7 @@ router.patch("/beds/:id/status", asyncH(async (req, res) => {
     bedId, physicalStatus: physical_status, reservationStatus: reservation_status,
     payerType: payer_type, destination, reservationNote: reservation_note, userId: req.user!.id,
     ipLast6: ip_last6, admissionType: admission_type, departmentName: department_name,
+    patientName: patient_name, admissionDate: admission_date,
     doctorId: doctor_id, departmentId: department_id, consultantGroupId: consultant_group_id,
   });
 
@@ -220,8 +225,14 @@ router.patch("/beds/:id/status", asyncH(async (req, res) => {
  *  admission — mirrors PRE's PATCH /beds/:id/admission exactly (see pre.ts). */
 router.patch("/beds/:id/admission", asyncH(async (req, res) => {
   const bedId = Number(req.params.id);
-  const { ip_last6, admission_type, department_name, doctor_id, department_id, consultant_group_id, payer_type } = z.object({
+  const { ip_last6, patient_name, admission_date, admission_type, department_name, doctor_id, department_id, consultant_group_id, payer_type } = z.object({
     ip_last6:        z.string().length(6).optional(),
+    // Omitted = untouched, so an admission that predates these fields keeps its
+    // blank value and unrelated edits (payer type, consultant) still save. Sent =
+    // fully validated, so a touched field can never be stored blank. No .nullable()
+    // — there is no request that legitimately clears these back to empty.
+    patient_name:    z.string().max(120).optional(),
+    admission_date:  z.string().max(10).optional(),
     admission_type:  z.enum(["IP", "DAYCARE", "OPD"]).optional(),
     department_name: z.string().max(120).nullable().optional(),
     doctor_id:       z.number().int().positive().nullable().optional(),
@@ -241,6 +252,7 @@ router.patch("/beds/:id/admission", asyncH(async (req, res) => {
   await updateActiveAdmission({
     bedId, userId: req.user!.id,
     ipLast6: ip_last6, admissionType: admission_type,
+    patientName: patient_name, admissionDate: admission_date,
     departmentName: department_name,
     doctorId: doctor_id, departmentId: department_id, consultantGroupId: consultant_group_id,
     payerType: payer_type,

@@ -316,7 +316,12 @@ router.patch("/beds/:id/admission", asyncH(async (req, res) => {
     "SELECT station_id FROM wards WHERE id=?"
   ).get<{ station_id: number | null }>(owns.ward_id);
   const blockName = blocks.find(b => b.id === owns.pre_block_id)?.name ?? "";
-  emitUpdate("bed:update", { bedId, wardId: owns.ward_id, floor: blockName }, {
+  // Carry the full current row, exactly as the status route above does. Clients
+  // patch that one bed in place when a payload has `bed`, and fall back to
+  // reloading the entire ward when it doesn't (PREApp's WardPage) — so omitting
+  // it here meant correcting one patient's name refetched every bed in the ward.
+  const bedDetail = await getBedDetail(bedId);
+  emitUpdate("bed:update", { bedId, wardId: owns.ward_id, floor: blockName, bed: bedDetail }, {
     pre: String(owns.pre_block_id),
     stationId: stationRow?.station_id ?? undefined,
   });

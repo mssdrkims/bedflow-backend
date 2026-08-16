@@ -258,7 +258,11 @@ router.patch("/beds/:id/admission", asyncH(async (req, res) => {
     payerType: payer_type,
   });
 
-  emitUpdate("bed:update", { bedId, wardId: bed.ward_id }, { wardId: bed.ward_id, stationId: bed.station_id ?? undefined });
+  // Full current row, same as the status route above — clients patch that one
+  // bed when the payload carries `bed`, and reload the whole ward when it
+  // doesn't. See the note on PRE's matching route.
+  const bedDetail = await getBedDetail(bedId);
+  emitUpdate("bed:update", { bedId, wardId: bed.ward_id, bed: bedDetail }, { wardId: bed.ward_id, stationId: bed.station_id ?? undefined });
   res.json({ ok: true });
 }));
 

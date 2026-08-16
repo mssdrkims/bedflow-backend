@@ -39,7 +39,15 @@ const CATEGORY_ACTIONS: Record<string, string[]> = {
     "destination_create", "destination_update", "destination_delete",
   ],
   discharge: [
-    "admission_create", "admission_close", "admission_move",
+    // admission_update belongs here with the rest of the admission lifecycle. It
+    // was missing, so every Patient Information correction — IP number, patient
+    // name, date of admission, consultant, department, payer — was written to
+    // audit_logs but then dropped out of the activity log the moment anyone
+    // applied a category filter. The rows were always there; they just could not
+    // be found. (The detail panel still renders nothing for them: enrichActivityRows'
+    // old/new branch only knows the bed-status keys. Deliberately left for later —
+    // the before/after values are all in audit_logs and queryable meanwhile.)
+    "admission_create", "admission_update", "admission_close", "admission_move",
     "discharge_plan", "discharge_reschedule", "discharge_cancel_plan", "discharge_initiate",
     "discharge_cancel", "discharge_step_update", "discharge_complete", "bed_transfer",
     "bed_readmit", "discharge_force_complete",

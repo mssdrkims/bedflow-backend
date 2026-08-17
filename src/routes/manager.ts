@@ -51,6 +51,25 @@ import {
 } from "../services/dischargeLoungeService.js";
 
 const router = Router();
+
+/** Tells connected clients that a hospital-wide reference list just changed, so
+ *  anything caching it can drop that cache.
+ *
+ *  Payer types and destinations already announced themselves this way (their
+ *  emits carry `payerTypeId` / `destinationId`). Doctors, departments and
+ *  consultant groups announced NOTHING, which was fine while every screen
+ *  re-fetched them on mount — but once the client began caching them for the
+ *  session, an admin adding a consultant stayed invisible to everyone already
+ *  logged in until they logged out and back in.
+ *
+ *  Rides on `bed:update` because that is the event every screen is already
+ *  subscribed to; `refData` names which list moved. No wardId on purpose — this
+ *  is hospital-wide, and a payload without one makes clients drop every cached
+ *  ward rather than guess which were affected. These edits are rare, so the
+ *  extra refetch costs nothing. */
+function emitRefDataChanged(list: "doctors" | "departments" | "consultant-groups") {
+  emitUpdate("bed:update", { refData: list });
+}
 router.use(authRequired, requireRole("COO"));
 
 // Nurses only join the `station:<id>` socket room, not `overview` — these
@@ -387,7 +406,9 @@ router.post("/doctors", asyncH(async (req, res) => {
     status:   z.enum(["active", "inactive"]).optional(),
     remarks:  z.string().max(500).optional(),
   }).parse(req.body);
-  res.status(201).json(await createDoctor({ ...b, adminId: req.user!.id }));
+  const created = await createDoctor({ ...b, adminId: req.user!.id });
+  emitRefDataChanged("doctors");
+  res.status(201).json(created);
 }));
 
 router.put("/doctors/:id", asyncH(async (req, res) => {
@@ -397,11 +418,15 @@ router.put("/doctors/:id", asyncH(async (req, res) => {
     status:   z.enum(["active", "inactive"]).optional(),
     remarks:  z.string().max(500).nullable().optional(),
   }).parse(req.body);
-  res.json(await editDoctor({ userId: Number(req.params.id), ...b, adminId: req.user!.id }));
+  const edited = await editDoctor({ userId: Number(req.params.id), ...b, adminId: req.user!.id });
+  emitRefDataChanged("doctors");
+  res.json(edited);
 }));
 
 router.delete("/doctors/:id", asyncH(async (req, res) => {
-  res.json(await deleteDoctor(Number(req.params.id), req.user!.id));
+  const removed = await deleteDoctor(Number(req.params.id), req.user!.id);
+  emitRefDataChanged("doctors");
+  res.json(removed);
 }));
 
 // ── bed details ───────────────────────────────────────────────────────────────
@@ -861,7 +886,9 @@ router.get("/departments", asyncH(async (_req, res) => {
 
 router.post("/departments", asyncH(async (req, res) => {
   const { name } = z.object({ name: z.string().min(1).max(150) }).parse(req.body);
-  res.json({ department: await createDepartment(name) });
+  const department = await createDepartment(name);
+  emitRefDataChanged("departments");
+  res.json({ department });
 }));
 
 router.put("/departments/:id", asyncH(async (req, res) => {
@@ -870,12 +897,16 @@ router.put("/departments/:id", asyncH(async (req, res) => {
     active: z.boolean().optional(),
   }).parse(req.body);
   const id = Number(req.params.id);
-  res.json(await updateDepartment({ id, name, active, userId: req.user!.id }));
+  const updated = await updateDepartment({ id, name, active, userId: req.user!.id });
+  emitRefDataChanged("departments");
+  res.json(updated);
 }));
 
 router.delete("/departments/:id", asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  res.json(await deleteDepartment({ id, userId: req.user!.id }));
+  const removed = await deleteDepartment({ id, userId: req.user!.id });
+  emitRefDataChanged("departments");
+  res.json(removed);
 }));
 
 // Read-only — still needed by the Consultant Groups member picker. Creating/
@@ -900,7 +931,9 @@ router.post("/consultant-groups", asyncH(async (req, res) => {
     doctor_ids: z.array(z.number().int().positive()).min(2),
     department_ids: z.array(z.number().int().positive()).min(1),
   }).parse(req.body);
-  res.json({ group: await createConsultantGroup({ name, doctorIds: doctor_ids, departmentIds: department_ids, userId: req.user!.id }) });
+  const group = await createConsultantGroup({ name, doctorIds: doctor_ids, departmentIds: department_ids, userId: req.user!.id });
+  emitRefDataChanged("consultant-groups");
+  res.json({ group });
 }));
 
 router.put("/consultant-groups/:id", asyncH(async (req, res) => {
@@ -911,12 +944,16 @@ router.put("/consultant-groups/:id", asyncH(async (req, res) => {
     department_ids: z.array(z.number().int().positive()).min(1).optional(),
   }).parse(req.body);
   const id = Number(req.params.id);
-  res.json(await updateConsultantGroup({ id, name, active, doctorIds: doctor_ids, departmentIds: department_ids, userId: req.user!.id }));
+  const updated = await updateConsultantGroup({ id, name, active, doctorIds: doctor_ids, departmentIds: department_ids, userId: req.user!.id });
+  emitRefDataChanged("consultant-groups");
+  res.json(updated);
 }));
 
 router.delete("/consultant-groups/:id", asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  res.json(await deleteConsultantGroup({ id, userId: req.user!.id }));
+  const removed = await deleteConsultantGroup({ id, userId: req.user!.id });
+  emitRefDataChanged("consultant-groups");
+  res.json(removed);
 }));
 
 // ── Discharge Lounge — a virtual holding ward, set up once by an admin. Lives
@@ -977,7 +1014,9 @@ router.post("/consultants", asyncH(async (req, res) => {
     password: z.string().min(8).max(72),
     department_ids: z.array(z.number().int().positive()).optional(),
   }).parse(req.body);
-  res.status(201).json({ consultant: await createConsultantUser({ name, username, password, departmentIds: department_ids, userId: req.user!.id }) });
+  const consultant = await createConsultantUser({ name, username, password, departmentIds: department_ids, userId: req.user!.id });
+  emitRefDataChanged("doctors");
+  res.status(201).json({ consultant });
 }));
 
 router.put("/consultants/:id", asyncH(async (req, res) => {
@@ -989,12 +1028,16 @@ router.put("/consultants/:id", asyncH(async (req, res) => {
     department_ids: z.array(z.number().int().positive()).optional(),
   }).parse(req.body);
   const id = Number(req.params.id);
-  res.json(await updateConsultantUser({ id, name, username, password, active, departmentIds: department_ids, userId: req.user!.id }));
+  const updated = await updateConsultantUser({ id, name, username, password, active, departmentIds: department_ids, userId: req.user!.id });
+  emitRefDataChanged("doctors");
+  res.json(updated);
 }));
 
 router.delete("/consultants/:id", asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  res.json(await deleteConsultantUser({ id, userId: req.user!.id }));
+  const removed = await deleteConsultantUser({ id, userId: req.user!.id });
+  emitRefDataChanged("doctors");
+  res.json(removed);
 }));
 
 // ── Discharge Phase SLAs ─────────────────────────────────────────────────────

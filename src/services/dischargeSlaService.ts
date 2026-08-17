@@ -415,7 +415,14 @@ export function nextPhasesToStart(completed: StepKey, tracking: TrackingRow): St
   }
 
   // Does completing this step unlock System Checkout?
-  if (tracking[startedCol("SYSTEM_CHECKOUT")] == null) {
+  // `completed !== "SYSTEM_CHECKOUT"` is load-bearing, not a tidy-up. A row can
+  // reach "groups 1-3 all done, system_checkout_started_at still NULL" — the
+  // force-complete paths write step statuses without stamping SLA columns — and
+  // completing System Checkout from there made this block return the step as its
+  // OWN successor. updateStep then emitted system_checkout_started_at twice in
+  // one SET clause, which Postgres rejects outright (42601, "multiple
+  // assignments to same column"), so the save failed with a 500.
+  if (completed !== "SYSTEM_CHECKOUT" && tracking[startedCol("SYSTEM_CHECKOUT")] == null) {
     const blockers = [...GROUP_STEPS[1], ...GROUP_STEPS[2], ...GROUP_STEPS[3]];
     const allClear = blockers.every((k) => {
       const v = k === completed ? "COMPLETED" : String(tracking[statusCol(k)] ?? "PENDING");
@@ -429,7 +436,11 @@ export function nextPhasesToStart(completed: StepKey, tracking: TrackingRow): St
     result.push("PHYSICAL_CHECKOUT");
   }
 
-  return result;
+  // updateStep turns every entry into its own SET assignment, so it cannot
+  // tolerate `completed` appearing here, nor the same key twice — either one
+  // yields a duplicate column and Postgres rejects the whole statement. Stating
+  // that invariant here keeps the burden off each branch above.
+  return [...new Set(result)].filter((k) => k !== completed);
 }
 
 /** @deprecated Use nextPhasesToStart instead */

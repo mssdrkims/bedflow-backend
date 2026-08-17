@@ -580,12 +580,28 @@ export async function autoCompleteDischargeForLoungeTransfer(admissionId: number
     }
 
     const forceSteps = (Object.keys(STEP_COLUMN) as StepKey[]).filter((s) => s !== "SYSTEM_CHECKOUT" && s !== "PHYSICAL_CHECKOUT");
-    const setSql = forceSteps.map((s) => `${STEP_COLUMN[s]}='COMPLETED'`).join(", ");
+    // Statuses alone are not enough. Everything downstream — the SLA view, the
+    // "Not started / took Xm" line, nextPhasesToStart's unlock check — reads the
+    // timestamp columns, so writing only the status left rows claiming a step was
+    // COMPLETED yet never started. COALESCE so a step that was genuinely worked
+    // through earlier keeps its real times; only the forced ones get `now`.
+    const stepSets = forceSteps.flatMap((s) => [
+      `${STEP_COLUMN[s]}='COMPLETED'`,
+      `${startedCol(s)}=COALESCE(${startedCol(s)}, ?)`,
+      `${completedCol(s)}=COALESCE(${completedCol(s)}, ?)`,
+    ]);
+    // Groups 1-3 are all clear now, which is exactly what unlocks System Checkout.
+    // Finishing that last step by hand would have stamped this; forcing must too,
+    // or the row lands "everything done, System Checkout never started" — the
+    // state that made completing it blow up with a duplicate-column UPDATE.
+    stepSets.push(`${startedCol("SYSTEM_CHECKOUT")}=COALESCE(${startedCol("SYSTEM_CHECKOUT")}, ?)`);
+    const setSql = stepSets.join(", ");
+    const stepParams = [...forceSteps.flatMap(() => [now, now]), now];
     const r = await db.prepare(
       `UPDATE discharge_tracking SET status='IN_PROGRESS', physical_checkout_status='COMPLETED', patient_left=true,
          physical_checkout_started_at=COALESCE(physical_checkout_started_at, ?), physical_checkout_completed_at=?,
          ${setSql}, updated_at=? WHERE id=? AND updated_at=?`
-    ).run(now, now, now, tracking!.id, tracking!.updated_at);
+    ).run(now, now, ...stepParams, now, tracking!.id, tracking!.updated_at);
     if (r.changes === 0) throw new HttpError(409, "This discharge was just updated by someone else. Please refresh and try again.");
 
     for (const s of [...forceSteps, "PHYSICAL_CHECKOUT" as StepKey]) {
@@ -668,10 +684,21 @@ export async function dischargeImmediate(opts: { admissionId: number; userId: nu
     }
 
     const steps = Object.keys(STEP_COLUMN) as StepKey[];
-    const setSql = steps.map((s) => `${STEP_COLUMN[s]}='COMPLETED'`).join(", ");
+    // Same reasoning as the lounge-transfer force above: stamp the SLA columns,
+    // not just the statuses, so this row's durations and history are readable
+    // rather than a completed discharge whose every phase claims "Not started".
+    // This row closes immediately so it can't hit the duplicate-column crash,
+    // but it would still report nulls to every downstream SLA consumer.
+    const stepSets = steps.flatMap((s) => [
+      `${STEP_COLUMN[s]}='COMPLETED'`,
+      `${startedCol(s)}=COALESCE(${startedCol(s)}, ?)`,
+      `${completedCol(s)}=COALESCE(${completedCol(s)}, ?)`,
+    ]);
+    const setSql = stepSets.join(", ");
+    const stepParams = steps.flatMap(() => [now, now]);
     const r = await db.prepare(
       `UPDATE discharge_tracking SET status='COMPLETED', patient_left=true, ${setSql}, updated_at=? WHERE id=? AND updated_at=?`
-    ).run(now, tracking!.id, tracking!.updated_at);
+    ).run(...stepParams, now, tracking!.id, tracking!.updated_at);
     if (r.changes === 0) throw new HttpError(409, "This discharge was just updated by someone else. Please refresh and try again.");
 
     for (const s of steps) {

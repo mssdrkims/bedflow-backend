@@ -310,13 +310,19 @@ export async function updateBedMaster(opts: {
 
   const now = Date.now();
   if (opts.operationalStatus !== undefined) {
-    // Discharge Lounge beds specifically can't be toggled while occupied, in
-    // either direction — same rule as the bulk range tool (see
-    // bulkSetBedOperational's doc comment). Scoped to just this ward on
-    // purpose: other wards' bed-master screen (Hospital Matrix) has no such
-    // restriction and isn't part of this rule.
-    if (opts.operationalStatus !== bed.operational_status && bed.physical_status === "OCCUPIED" && bed.is_discharge_lounge) {
-      throw new HttpError(409, "This bed is occupied — free it up before changing its operational status.");
+    // A Discharge Lounge bed with a patient in it can't be taken OUT of service —
+    // same rule as the bulk range tool (see bulkSetBedOperational's doc comment).
+    // Scoped to just this ward on purpose: other wards' bed-master screen
+    // (Hospital Matrix) has no such restriction and isn't part of this rule.
+    //
+    // Directional on purpose. Blocking both directions trapped any bed that was
+    // already occupied AND non-operational — a state left behind by beds
+    // disabled before this rule existed — because the only way out (Enable) was
+    // barred by the same check. Putting an occupied bed back INTO service moves
+    // no patient and frees nothing; it just re-admits the bed to the capacity
+    // count it physically belongs in, so it is always safe to allow.
+    if (opts.operationalStatus === false && bed.operational_status && bed.physical_status === "OCCUPIED" && bed.is_discharge_lounge) {
+      throw new HttpError(409, "This bed is occupied — free it up before taking it out of service.");
     }
     await db.prepare("UPDATE bed_details SET operational_status=?, updated_at=? WHERE id=?")
       .run(opts.operationalStatus, now, opts.bedId);
@@ -349,9 +355,14 @@ export async function updateBedMaster(opts: {
  *  not "occupied"). Non-numeric bed names (if any were ever renamed to
  *  something else) are simply outside the match and untouched.
  *
- *  Occupied beds can never have their operational_status changed in EITHER
- *  direction, full stop — this is a holding-bay capacity control, not a way
- *  to touch a bed that still has a patient in it. */
+ *  Occupied beds can't be taken OUT of service — this is a holding-bay capacity
+ *  control, not a way to shut down a bed that still has a patient in it. Putting
+ *  one back INTO service is always allowed: it moves no patient and frees
+ *  nothing. That asymmetry is deliberate — blocking both directions stranded
+ *  beds that were already occupied AND non-operational (disabled before this
+ *  rule existed), since Enable was refused by the very check meant to protect
+ *  them. `skippedOccupied` therefore only ever counts beds skipped on a
+ *  disable pass. */
 export async function bulkSetBedOperational(opts: {
   wardId: number; fromNum: number; toNum: number; operationalStatus: boolean; userId: number;
 }): Promise<{ ok: true; updated: number; skippedOccupied: number; totalInRange: number }> {
@@ -365,22 +376,31 @@ export async function bulkSetBedOperational(opts: {
 
   const totalInRange = rows.length;
   const needsChange = rows.filter((r) => r.operational_status !== operationalStatus);
-  const changeable = needsChange.filter((r) => r.physical_status !== "OCCUPIED");
+  // Only a disable pass has to spare occupied beds; enabling one is harmless.
+  const changeable = operationalStatus
+    ? needsChange
+    : needsChange.filter((r) => r.physical_status !== "OCCUPIED");
   let skippedOccupied = needsChange.length - changeable.length;
   if (!changeable.length) return { ok: true, updated: 0, skippedOccupied, totalInRange };
 
   const now = Date.now();
-  // physical_status is re-checked here, at write time, not just in the SELECT
-  // above — a bed can be admitted into in the gap between that read and this
-  // write (e.g. a nurse admits a patient into bed #47 the instant an admin
-  // bulk-disables a range containing it). Each UPDATE only takes effect if the
-  // bed is still non-occupied at that exact moment; if not, r.changes is 0 and
-  // it's counted as skipped rather than silently disabling an occupied bed.
+  // On a DISABLE pass, physical_status is re-checked at write time, not just in
+  // the SELECT above — a bed can be admitted into in the gap between that read
+  // and this write (e.g. a nurse admits a patient into bed #47 the instant an
+  // admin bulk-disables a range containing it). Each UPDATE only takes effect if
+  // the bed is still non-occupied at that exact moment; if not, r.changes is 0
+  // and it's counted as skipped rather than silently disabling an occupied bed.
+  //
+  // An ENABLE pass carries no such guard: there is no race to lose, because a
+  // bed becoming occupied mid-run is not a reason to leave it out of service.
+  // Keeping the guard here would have re-blocked the stranded beds that the
+  // directional `changeable` filter above just made reachable.
+  const occupancyGuard = operationalStatus ? "" : " AND physical_status != 'OCCUPIED'";
   let updated = 0;
   await db.transaction(async () => {
     for (const row of changeable) {
       const r = await db.prepare(
-        "UPDATE bed_details SET operational_status=?, updated_at=? WHERE id=? AND physical_status != 'OCCUPIED'"
+        `UPDATE bed_details SET operational_status=?, updated_at=? WHERE id=?${occupancyGuard}`
       ).run(operationalStatus, now, row.id);
       if (r.changes === 0) { skippedOccupied++; continue; }
       updated++;
